@@ -393,6 +393,23 @@ conv(x::TrackedArray,  w::AbstractArray; kw...) = track(conv, x, w; kw...)
       (NNlib.∇conv_data(data.((Δ, x, w))...; kw...),
        NNlib.∇conv_filter(data.((Δ, x, w))...; kw...)))
 
+# fused_conv_bias_activate
+conv_bias_activate(x::TrackedArray, w::TrackedArray,  b::TrackedArray;  kw...) = track(conv, x, w, b; kw...)
+conv_bias_activate(x::TrackedArray,  w::TrackedArray, b::AbstractArray;  kw...) = track(conv, x, w, b; kw...)
+conv_bias_activate(x::TrackedArray,  w::TrackedArray, b::AbstractArray;  kw...) = track(conv, x, w, b; kw...)
+conv_bias_activate(x::AbstractArray, w::TrackedArray;  kw...) = track(conv, x, w; kw...)
+conv_bias_activate(x::TrackedArray,  w::AbstractArray; kw...) = track(conv, x, w; kw...)
+
+# TODO: Move to NNlib
+∇conv_bias(data.((Δ, x, w))...; kw...)))
+
+@grad conv_bias_activate(x, w, b; kw...) =
+  conv_bias_activate(data(x), data(w), data(b); kw...),
+    Δ -> nobacksies(:conv,
+      (NNlib.∇conv_data(data.((Δ, x, w))...; kw...),
+       NNlib.∇conv_filter(data.((Δ, x, w))...; kw...),
+       NNlib.∇conv_bias(data.((Δ, x, w))...; kw...)))
+
 maxpool(x::TrackedArray, k; kw...) = track(maxpool, x, k; kw...)
 
 @grad function maxpool(x, k; kw...)

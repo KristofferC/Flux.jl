@@ -37,10 +37,39 @@ Conv(k::NTuple{N,Integer}, ch::Pair{<:Integer,<:Integer}, σ = identity;
 
 @treelike Conv
 
-function (c::Conv)(x::AbstractArray)
+# Fall through
+(c::Conv)(x::AbstractArray) = _conv(c, x)
+
+
+@init @require CuArrays="3a865a2d-5b23-5a0f-bc46-62713ec82fae" begin
+  import .CuArrays: CuArray
+  function (c::Conv)(x::CuArray)
+    # These are the only supported activation functions for cudnnConvolutionBiasActivationForwardd
+    activation_mode = 
+      c.σ == relu     ? CuArrays.CUDNN.CUDNN_ACTIVATION_RELU :
+      #c.σ == identity ? CuArrays.CUDNN.CUDNN_ACTIVATION_IDENTITY :
+                        -1
+    if activation_mode == -1
+      return _conv(c, x)
+    else
+      b = reshape(c.bias, map(_->1, c.stride)..., :, 1)
+      return fused_conv_bias_activate(x, c.weight, stride = c.stride, pad = c.pad, dilation = c.dilation, mode=activationMode)
+    end
+  end
+end
+
+
+function fused_conv_bias_activate_relu(x::CuArray{T}; mode::UInt32) where {T <: Union{Float16, Float32, Float64}}
+  println("using cudnn")
+  b = reshape(c.bias, map(_->1, c.stride)..., :, 1)
+  y = similar(x, NNlib.cdims(size(x), NNlib.dilation_dims(c.weight, c.dilation), c.pad, c.stride))
+  CuArrays.CUDNN.cudnnConvolutionBiasActivationForward(y, x, c.weight.data, b.data; stride = c.stride, padding = c.pad, dilation = c.dilation, activationMode=activation_mode)
+end
+
+function _conv(c::Conv, x::AbstractArray)
+  σ, b = c.σ, reshape(c.bias, map(_->1, c.stride)..., :, 1)
   # TODO: breaks gpu broadcast :(
   # ndims(x) == ndims(c.weight)-1 && return squeezebatch(c(reshape(x, size(x)..., 1)))
-  σ, b = c.σ, reshape(c.bias, map(_->1, c.stride)..., :, 1)
   σ.(conv(x, c.weight, stride = c.stride, pad = c.pad, dilation = c.dilation) .+ b)
 end
 
@@ -51,11 +80,11 @@ function Base.show(io::IO, l::Conv)
   print(io, ")")
 end
 
-(a::Conv{<:Any,<:Any,W})(x::AbstractArray{T}) where {T <: Union{Float32,Float64}, W <: AbstractArray{T}} =
-  invoke(a, Tuple{AbstractArray}, x)
+#(a::Conv{<:Any,<:Any,W})(x::AbstractArray{T}) where {T <: Union{Float32,Float64}, W <: AbstractArray{T}} =
+#  invoke(a, Tuple{AbstractArray}, x)
 
-(a::Conv{<:Any,<:Any,W})(x::AbstractArray{<:Real}) where {T <: Union{Float32,Float64}, W <: AbstractArray{T}} =
-  a(T.(x))
+#(a::Conv{<:Any,<:Any,W})(x::AbstractArray{<:Real}) where {T <: Union{Float32,Float64}, W <: AbstractArray{T}} =
+#  a(T.(x))
 
 """
     DepthwiseConv(size, in)
