@@ -235,10 +235,9 @@ batchnorm(g::CuArray{T}, b::CuArray{T}, x::TrackedArray, running_mean::CuArray{T
 @grad batchnorm(g, b, x, running_mean, running_var, momentum; kw...) =
   batchnorm(data.((g, b, x))..., running_mean, running_var, momentum; kw...), Δ -> (nobacksies(:batchnorm, ∇batchnorm(data.((g, b, x, Δ))..., running_mean, running_var, momentum; kw...))..., nothing, nothing, nothing)
 
-function convbias!(y::CuArray{T}, x::CuArray{T}, w::CuArray{T}, b::CuArray{T};
+function convbias_relu!(y::CuArray{T}, x::CuArray{T}, w::CuArray{T}, b::CuArray{T};
                    pad = 0, stride = 1, flipkernel = 0, alpha = 1, dilation = 1,
-                   workspace::Union{CuVector, Nothing}=nothing, algo=0,
-                   activationMode = 5) where T<:CUDNNFloat
+                   workspace::Union{CuVector, Nothing}=nothing, algo=0) where T<:CUDNNFloat
   if version() < v"6"
     all(x -> x == 1, dilation) || error("Only dilation = 1 is supported in cuDNN version < 6")
   end
@@ -250,25 +249,63 @@ function convbias!(y::CuArray{T}, x::CuArray{T}, w::CuArray{T}, b::CuArray{T};
   else
     workspace_size = length(workspace[])
   end
-  cudnnConvolutionBiasActivationForward(y, x, w, b, padding=pad, stride=stride, mode=flipkernel, alpha1=alpha, activationMode=activationMode, algo=algo, workspace=workspace, workspace_size=workspace_size)
+  cudnnConvolutionBiasActivationForward(y, x, w, b, padding=pad, stride=stride, mode=flipkernel, alpha1=alpha, activationMode=CuArrays.CUDNN.CUDNN_ACTIVATION_RELU, algo=algo, workspace=workspace, workspace_size=workspace_size)
 end
 
-function convbias(x::CuArray{T}, w::CuArray{T}, b::CuArray{T};
+function convbias_relu(x::CuArray{T}, w::CuArray{T}, b::CuArray{T};
                   pad = 0, stride = 1, flipkernel = 0, alpha = 1, dilation = 1,
-                  workspace::Union{CuVector, Nothing}=nothing, algo=0,
-                  activationMode = 5) where T<:CUDNNFloat
+                  workspace::Union{CuVector, Nothing}=nothing, algo=0) where T<:CUDNNFloat
   pad_, stride_ = padtuple(x, pad), padtuple(x, stride)
-  convbias!(similar(x, cdims(size(x), dilation_dims(w, dilation), pad_, stride_)),
+  convbias_relu!(similar(x, cdims(size(x), dilation_dims(w, dilation), pad_, stride_)),
             x, w, b, pad = pad_, stride = stride_, flipkernel = flipkernel, dilation = dilation,
-            alpha = alpha, workspace = workspace, algo = algo, activationMode = activationMode)
+            alpha = alpha, workspace = workspace, algo = algo)
+end
+
+convbias_relu(x::TrackedArray, w::TrackedArray, b::TrackedArray; kw...) = track(convbias_relu, x, w, b; kw...)
+
+convbias_relu(x::CuArray{T}, w::TrackedArray, b::TrackedArray; kw...) where T<:CUDNNFloat =
+  track(convbias_relu, x, w, b; kw...)
+
+convbias_relu(x::CuArray{T}, w::CuArray{T}, b::TrackedArray; kw...) where T<:CUDNNFloat =
+  track(convbias_relu, x, w, b; kw...)
+
+convbias_relu(x::TrackedArray, w::CuArray{T}, b::TrackedArray; kw...) where T<:CUDNNFloat =
+  track(convbias_relu, x, w, b; kw...)
+
+convbias_relu(x::TrackedArray, w::TrackedArray, b::CuArray{T}; kw...) where T<:CUDNNFloat =
+  track(convbias_relu, x, w, b; kw...)
+
+convbias_relu(x::CuArray{T}, w::TrackedArray, b::CuArray{T}; kw...) where T<:CUDNNFloat =
+  track(convbias_relu, x, w, b; kw...)
+
+convbias_relu(x::TrackedArray, w::CuArray{T}, b::CuArray{T}; kw...) where T<:CUDNNFloat =
+  track(convbias_relu, x, w, b; kw...)
+
+convbias_relu(x::TrackedArray, w::TrackedArray, b::CuArray{T}; kw...) where T<:CUDNNFloat =
+  track(convbias_relu, x, w, b; kw...)
+
+@grad function convbias_relu(x, w, b; kw...)
+  println("reluing...")
+  bias = reshape(b, map(_->1, size(w)[1:end-2])..., :, 1)
+  if version() >= v"7.1"
+    y = convbias_relu(data.((x, w, bias))...; kw...)
+  else
+    y = cudnnAddTensor(data(bias), conv(data.((x, w))...; kw...))
+  end
+  y, Δ -> nobacksies(:convbias_relu, (∇conv_data(data.((Δ, x, w))...; kw...), ∇conv_filter(data.((Δ, x, w))...; kw...), ∇conv_bias(data.((Δ, bias))...; kw...)))
 end
 
 ∇conv_bias(Δ::CuArray{T}, b::CuArray{T}; pad = 0, beta = 0,
            stride = 1, mode = 0, alpha = 1, dilation = 1) where T<:CUDNNFloat =
   reshape(cudnnConvolutionBackwardBias(similar(b), Δ, alpha=alpha, beta=beta), :)
 
-(m::Flux.Conv)(x::Union{CuParam{T,4},CuParam{T,5}}) where T<:CUDNNFloat =
-  m.σ.(convbias(x, m.weight, m.bias, pad = m.pad, stride = m.stride, dilation = m.dilation))
+function (m::Flux.Conv)(x::Union{CuParam{T,4},CuParam{T,5}}) where T<:CUDNNFloat
+  if m.σ == relu
+      convbias_relu(x, m.weight, m.bias, pad = m.pad, stride = m.stride, dilation = m.dilation)
+  else
+    m.σ.(convbias(x, m.weight, m.bias, pad = m.pad, stride = m.stride, dilation = m.dilation))
+  end
+end
 
 convbias(x::TrackedArray, w::TrackedArray, b::TrackedArray; kw...) = track(convbias, x, w, b; kw...)
 
@@ -295,10 +332,6 @@ convbias(x::TrackedArray, w::TrackedArray, b::CuArray{T}; kw...) where T<:CUDNNF
 
 @grad function convbias(x, w, b; kw...)
   bias = reshape(b, map(_->1, size(w)[1:end-2])..., :, 1)
-  if version() >= v"7.1"
-    y = convbias(data.((x, w, bias))...; kw...)
-  else
-    y = cudnnAddTensor(data(bias), conv(data.((x, w))...; kw...))
-  end
+  y = cudnnAddTensor(data(bias), conv(data.((x, w))...; kw...))
   y, Δ -> nobacksies(:convbias, (∇conv_data(data.((Δ, x, w))...; kw...), ∇conv_filter(data.((Δ, x, w))...; kw...), ∇conv_bias(data.((Δ, bias))...; kw...)))
 end
